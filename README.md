@@ -34,6 +34,17 @@ python3 app.py --db ./data.db --port 8309
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
 - `GET /api/audit`：读取审计记录。
+- `GET /api/entities/<id>/effective-calibrations`：按时间顺序读取仪器历次生效校准的审批快照。
+
+### 校准审批生效
+
+计量管理员（`authorizer`）审批通过校准（`calibration` 的 `approve` 动作）时，校准状态、仪器生效校准与审计在同一个数据库事务内完成：
+
+- 仪器写入 `effective_calibration_id`、`effective_calibration_no`（未提供 `calibration_no` 时用校准记录 id）和 `due_at`，仪器版本加一。
+- 每次审批在 `calibration_snapshots` 中保留一份不可变快照，并在校准和仪器上各写一条审计。
+- 仪器已隔离，或已存在更新的已生效校准（按 `performed_at` 比较）时拒绝审批，返回 `409 Conflict`，仪器、校准与审计均保持不变。
+
+检测结果放行（`result` 的 `release` 动作）按仪器当前生效校准（已审批且 `due_at` 未到期）判断；放行后的结果记录返回所采用的 `calibration_id`、`calibration_no` 和 `due_at`。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
 

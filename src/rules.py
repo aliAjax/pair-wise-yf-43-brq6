@@ -21,8 +21,30 @@ def _validate_perform(actor, entity, data, lookup):
         raise ValidationError("passed calibration requires due_at")
 
 
-def calibration_current(due_at, as_of):
+# 演示模型使用固定业务日期判断校准是否到期。
+REFERENCE_AS_OF = "2026-09-24"
+
+
+def calibration_current(due_at, as_of=REFERENCE_AS_OF):
     return str(due_at) >= str(as_of)
+
+
+def calibration_no(calibration):
+    """对外展示的校准编号：优先取 calibration_no，否则用记录 id。"""
+    return calibration["data"].get("calibration_no") or calibration["id"]
+
+
+def find_effective_calibration(instrument, lookup, as_of=REFERENCE_AS_OF):
+    """返回仪器当前生效校准（已审批且未到期），不存在时返回 None。"""
+    calibration_id = instrument["data"].get("effective_calibration_id")
+    if not calibration_id:
+        return None
+    calibration = _find_one(lookup, "calibration", "id", calibration_id)
+    if not calibration or calibration["status"] != "approved":
+        return None
+    if not calibration_current(calibration["data"].get("due_at", ""), as_of):
+        return None
+    return calibration
 
 
 def _validate_result_release(actor, entity, data, lookup):
@@ -30,13 +52,19 @@ def _validate_result_release(actor, entity, data, lookup):
     method = _find_one(lookup, "method", "id", data.get("method_id"))
     if not instrument or instrument["status"] != "active":
         raise ValidationError("result requires an active instrument")
-    if not calibration_current(instrument["data"].get("due_at", ""), "2026-09-24"):
+    calibration = find_effective_calibration(instrument, lookup)
+    if not calibration:
         raise ValidationError("instrument calibration is not current")
     if not method or method["status"] != "validated":
         raise ValidationError("result requires a validated method")
     if data.get("instrument_id") not in method["data"].get("instrument_ids", []):
         raise ValidationError("method is not validated for this instrument")
-    return {"released_by": actor.user_id}
+    return {
+        "released_by": actor.user_id,
+        "calibration_id": calibration["id"],
+        "calibration_no": calibration_no(calibration),
+        "due_at": calibration["data"].get("due_at"),
+    }
 
 
 CUSTOM_CREATE = {'calibration': _validate_calibration}
