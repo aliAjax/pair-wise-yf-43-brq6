@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .domain import (
     ConflictError,
@@ -6,6 +6,10 @@ from .domain import (
     PermissionDenied,
     ValidationError,
 )
+
+
+def _today():
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _validate_calibration(actor, data, lookup):
@@ -25,22 +29,56 @@ def calibration_current(due_at, as_of):
     return str(due_at) >= str(as_of)
 
 
+def check_calibration_approvable(instrument, calibration):
+    """Raise if the calibration cannot take effect on the instrument.
+
+    Quarantined instruments and instruments already running on a newer
+    effective calibration reject the approval with a 409 conflict; the
+    caller must leave instrument and audit untouched in that case.
+    """
+    if not instrument or instrument.get("kind") != "instrument":
+        raise ValidationError("instrument does not exist")
+    if instrument["status"] == "quarantined":
+        raise ConflictError("instrument is quarantined; calibration cannot take effect")
+    current_id = instrument["data"].get("effective_calibration_id")
+    if current_id and current_id != calibration["id"]:
+        current_performed = str(instrument["data"].get("effective_performed_at", ""))
+        new_performed = str(calibration["data"].get("performed_at", ""))
+        if current_performed > new_performed:
+            raise ConflictError("a newer effective calibration already exists")
+
+
+def _validate_calibration_approve(actor, entity, data, lookup):
+    if not entity["data"].get("due_at"):
+        raise ValidationError("passed calibration requires due_at before approval")
+    instrument = _find_one(lookup, "instrument", "id", entity["data"].get("instrument_id"))
+    check_calibration_approvable(instrument, entity)
+
+
 def _validate_result_release(actor, entity, data, lookup):
     instrument = _find_one(lookup, "instrument", "id", data.get("instrument_id"))
     method = _find_one(lookup, "method", "id", data.get("method_id"))
     if not instrument or instrument["status"] != "active":
         raise ValidationError("result requires an active instrument")
-    if not calibration_current(instrument["data"].get("due_at", ""), "2026-09-24"):
+    calibration_id = instrument["data"].get("effective_calibration_id")
+    if not calibration_id:
+        raise ValidationError("instrument has no effective calibration")
+    due_at = instrument["data"].get("due_at", "")
+    if not calibration_current(due_at, _today()):
         raise ValidationError("instrument calibration is not current")
     if not method or method["status"] != "validated":
         raise ValidationError("result requires a validated method")
     if data.get("instrument_id") not in method["data"].get("instrument_ids", []):
         raise ValidationError("method is not validated for this instrument")
-    return {"released_by": actor.user_id}
+    return {
+        "released_by": actor.user_id,
+        "calibration_id": calibration_id,
+        "calibration_due_at": due_at,
+    }
 
 
 CUSTOM_CREATE = {'calibration': _validate_calibration}
-CUSTOM_TRANSITIONS = {('calibration', 'perform'): _validate_perform, ('result', 'release'): _validate_result_release}
+CUSTOM_TRANSITIONS = {('calibration', 'perform'): _validate_perform, ('calibration', 'approve'): _validate_calibration_approve, ('result', 'release'): _validate_result_release}
 
 
 class RuleEngine:

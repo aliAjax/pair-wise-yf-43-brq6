@@ -2,7 +2,7 @@ from uuid import uuid4
 
 from .audit import AuditTrail
 from .domain import ConflictError, NotFoundError
-from .rules import RuleEngine
+from .rules import RuleEngine, check_calibration_approvable
 
 
 class DomainService:
@@ -45,6 +45,8 @@ class DomainService:
         next_status, patch = self.rules.validate_transition(
             actor, entity, action, dict(data or {}), self._lookup
         )
+        if entity["kind"] == "calibration" and action == "approve":
+            return self._approve_calibration(actor, entity, next_status, patch, expected)
         merged = dict(entity["data"])
         merged.update(patch)
         updated = self.repository.update_entity(entity_id, expected, next_status, merged)
@@ -57,6 +59,76 @@ class DomainService:
             {"patch": patch},
         )
         return updated
+
+    def _approve_calibration(self, actor, calibration, next_status, patch, expected_version):
+        """Approve a calibration and make it effective on its instrument atomically."""
+        instrument_id = calibration["data"].get("instrument_id")
+        instrument = self.repository.get_entity(instrument_id)
+        check_calibration_approvable(instrument, calibration)
+        instrument_patch = {
+            "effective_calibration_id": calibration["id"],
+            "effective_performed_at": calibration["data"].get("performed_at"),
+            "due_at": calibration["data"].get("due_at"),
+        }
+        merged_calibration = dict(calibration["data"])
+        merged_calibration.update(patch)
+        merged_instrument = dict(instrument["data"])
+        merged_instrument.update(instrument_patch)
+        snapshot = {
+            "instrument_id": instrument_id,
+            "calibration_id": calibration["id"],
+            "due_at": calibration["data"].get("due_at"),
+            "performed_at": calibration["data"].get("performed_at"),
+            "approved_by": actor.user_id,
+            "detail": {
+                "authorized_by": patch.get("authorized_by"),
+                "calibration_version": calibration["version"] + 1,
+                "instrument_version": instrument["version"] + 1,
+                "instrument_patch": instrument_patch,
+            },
+        }
+        audit_entries = [
+            {
+                "entity_id": calibration["id"],
+                "actor_id": actor.user_id,
+                "actor_role": actor.role,
+                "action": "approve",
+                "from_status": calibration["status"],
+                "to_status": next_status,
+                "detail": {"patch": patch},
+            },
+            {
+                "entity_id": instrument_id,
+                "actor_id": actor.user_id,
+                "actor_role": actor.role,
+                "action": "calibration_effective",
+                "from_status": instrument["status"],
+                "to_status": instrument["status"],
+                "detail": {"patch": instrument_patch},
+            },
+        ]
+
+        def verify(calibration_row, instrument_row):
+            check_calibration_approvable(instrument_row, calibration_row)
+
+        return self.repository.apply_calibration_approval(
+            calibration_id=calibration["id"],
+            calibration_version=expected_version,
+            calibration_status=next_status,
+            calibration_data=merged_calibration,
+            instrument_id=instrument_id,
+            instrument_version=instrument["version"],
+            instrument_data=merged_instrument,
+            snapshot=snapshot,
+            audit_entries=audit_entries,
+            verify=verify,
+        )
+
+    def calibration_history(self, instrument_id):
+        instrument = self.repository.get_entity(instrument_id)
+        if not instrument or instrument["kind"] != "instrument":
+            raise NotFoundError("instrument not found: " + instrument_id)
+        return self.repository.list_calibration_snapshots(instrument_id)
 
     def get(self, entity_id):
         entity = self.repository.get_entity(entity_id)

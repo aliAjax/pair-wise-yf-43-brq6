@@ -33,9 +33,16 @@ python3 app.py --db ./data.db --port 8309
 - `POST /api/<kind>`：创建对象；请求体为JSON。
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `GET /api/instruments/<id>/calibrations`：按时间列出仪器的历史生效校准快照。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+
+## 校准生效与结果放行
+
+- 校准记录`approve`通过时，在同一事务内更新仪器的`effective_calibration_id`、`due_at`和版本，并写入一条审批快照；仪器侧审计记录`calibration_effective`。
+- 仪器已隔离（`quarantined`）或已存在更新的有效校准（按`performed_at`比较）时，审批返回409，仪器和审计均不变。
+- 结果`release`按仪器当前生效校准判断到期日，响应数据中的`calibration_id`和`calibration_due_at`为实际采用的校准编号和到期日。
 
 ## 测试
 
